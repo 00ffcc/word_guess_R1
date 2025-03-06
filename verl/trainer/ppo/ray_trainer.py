@@ -508,6 +508,10 @@ class RayPPOTrainer(object):
                     'do_sample': False,
                     'validate': True,
                 }
+
+                ground_truth_batch = test_batch.select(non_tensor_batch_keys=['reward_model'])
+                test_gen_batch.union(ground_truth_batch)
+
                 with _timer('step', timing_raw):
                     first_input_ids = test_gen_batch.batch['input_ids'][:, -gen_config.max_start_length:].clone()
                     with _timer('gen', timing_raw):
@@ -707,6 +711,8 @@ class RayPPOTrainer(object):
 
                 # pop those keys for generation
                 gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+                ground_truth_batch = batch.select(non_tensor_batch_keys=['reward_model'])
+                gen_batch.union(ground_truth_batch)
 
                 ####################
                 # original code here

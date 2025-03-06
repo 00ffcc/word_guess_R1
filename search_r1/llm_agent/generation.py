@@ -66,10 +66,8 @@ class LLMGenerationManager:
             skip_special_tokens=True
         )
 
-        responses_str = [resp.split('</search>')[0] + '</search>'
-                 if '</search>' in resp 
-                 else resp.split('</answer>')[0] + '</answer>'
-                 if '</answer>' in resp 
+        responses_str = [resp.split('</query>')[0] + '</query>'
+                 if '</query>' in resp 
                  else resp
                  for resp in responses_str]
 
@@ -200,6 +198,8 @@ class LLMGenerationManager:
         active_num_list = [active_mask.sum().item()]
         rollings = gen_batch
 
+        ground_truth = [gen_batch[i].non_tensor_batch['reward_model']['ground_truth'] for i in range(len(gen_batch))]
+
         # Main generation loop
         for step in range(self.config.max_turns):
             if not active_mask.sum():
@@ -211,17 +211,18 @@ class LLMGenerationManager:
             
             # gen_output = self.actor_rollout_wg.generate_sequences(rollings)
             rollings_active = DataProto.from_dict({
-                k: v[active_mask] for k, v in rollings.batch.items()
+                k: v[active_mask] for k, v in rollings.batch.items() # mask是bool
             })            
             gen_output = self._generate_with_gpu_padding(rollings_active)
 
             meta_info = gen_output.meta_info            
             responses_ids, responses_str = self._postprocess_responses(gen_output.batch['responses'])
-            responses_ids, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_str, active_mask)
+            responses_ids, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_str, active_mask) # 恢复成之前的格式
 
             # Execute in environment and process observations
+            # shape?
             next_obs, dones = self.execute_predictions(
-                responses_str, self.tokenizer.pad_token, active_mask
+                responses_str, ground_truth, self.tokenizer.pad_token, active_mask
             )
             
             curr_active_mask = torch.tensor([not done for done in dones], dtype=torch.bool)
@@ -240,37 +241,6 @@ class LLMGenerationManager:
                 original_right_side,
                 responses_ids,
                 next_obs_ids
-            )
-            
-        # final LLM rollout
-        if active_mask.sum():
-            rollings.batch = self.tensor_fn.cut_to_effective_len(
-                rollings.batch,
-                keys=['input_ids', 'attention_mask', 'position_ids']
-            )
-
-            # gen_output = self.actor_rollout_wg.generate_sequences(rollings)
-            rollings_active = DataProto.from_dict({
-                k: v[active_mask] for k, v in rollings.batch.items()
-            })            
-            gen_output = self._generate_with_gpu_padding(rollings_active)
-
-            meta_info = gen_output.meta_info            
-            responses_ids, responses_str = self._postprocess_responses(gen_output.batch['responses'])
-            responses_ids, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_str, active_mask)
-
-            # # Execute in environment and process observations
-            _, dones = self.execute_predictions(
-                responses_str, self.tokenizer.pad_token, active_mask, do_search=False
-            )
-
-            curr_active_mask = torch.tensor([not done for done in dones], dtype=torch.bool)
-            active_mask = active_mask * curr_active_mask
-            active_num_list.append(active_mask.sum().item())
-
-            original_right_side = self._update_right_side(
-                original_right_side,
-                responses_ids,
             )
         
         print("ACTIVE_TRAJ_NUM:", active_num_list)
@@ -305,7 +275,7 @@ class LLMGenerationManager:
         
         return final_output
 
-    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True) -> List[str]:
+    def execute_predictions(self, predictions: List[str], ground_truth: List[str], pad_token: str, active_mask=None, do_search=True) -> List[str]:
         """
         Execute predictions across multiple environments.
         NOTE: the function is the actual `step` function in the environment
@@ -322,32 +292,24 @@ class LLMGenerationManager:
         cur_actions, contents = self.postprocess_predictions(predictions)
         next_obs, dones = [], []
         
-        search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']
-        if do_search:
-            search_results = self.batch_search(search_queries)
-            assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])
-        else:
-            search_results = [''] * sum([1 for action in cur_actions if action == 'search'])
 
-        for i, (action, active) in enumerate(zip(cur_actions, active_mask)):
+        for i, (action, active, content) in enumerate(zip(cur_actions, active_mask, contents)):
             
             if not active:
                 next_obs.append('')
                 dones.append(1)
             else:
-                if action == 'answer':
-                    next_obs.append('')
-                    dones.append(1)
-                elif action == 'search':
-                    next_obs.append(f'\n\n<information>{search_results.pop(0).strip()}</information>\n\n')
-                    dones.append(0)
+                if action == 'query':
+                    if content != ground_truth[i]:
+                        next_obs.append(f'<res>{gen_res(content, ground_truth[i])}</res>')
+                        dones.append(0)
+                    else:
+                        next_obs.append('')
+                        dones.append(1)
                 else:
-                    next_obs.append(f'\nMy previous action is invalid. \
-If I want to search, I should put the query between <search> and </search>. \
-If I want to give the final answer, I should put the answer between <answer> and </answer>. Let me try again.\n')
+                    next_obs.append(f'\nMy previous action is invalid. I should put the query between <query> and </query>. Let me try again.\n')
                     dones.append(0)
             
-        assert len(search_results) == 0
             
         return next_obs, dones
 
@@ -366,7 +328,7 @@ If I want to give the final answer, I should put the answer between <answer> and
                 
         for prediction in predictions:
             if isinstance(prediction, str): # for llm output
-                pattern = r'<(search|answer)>(.*?)</\1>'
+                pattern = r'<query>(.*?)</\1>'
                 match = re.search(pattern, prediction, re.DOTALL)
                 if match:
                     content = match.group(2).strip()  # Return only the content inside the tags
@@ -414,3 +376,15 @@ If I want to give the final answer, I should put the answer between <answer> and
             format_reference += f"Doc {idx+1}(Title: {title}) {text}\n"
 
         return format_reference
+
+def gen_res(prediction: str, ground_truth: str) -> str:
+    res = ''
+    for i in range(len(prediction)):
+        if prediction[i] == ground_truth[i]:
+            res += '0'
+        else:
+            if prediction[i] not in ground_truth:
+                res += '1'
+            else:
+                res += '2'
+    return res
