@@ -1,5 +1,6 @@
 import datasets
 
+
 def gen_gen(words, split):
     def gen():
         for idx, word in enumerate(words):
@@ -7,35 +8,30 @@ def gen_gen(words, split):
             word = word.upper()
             word_length = len(word)
             prompt = f"""
-    You are playing a word-guessing game.  Your goal is to guess a secret word of length {word_length} with the fewest possible queries. You can make guesses by using the following format:
+Let's play Wordle. Your goal is to guess the secret {word_length}-letter word. You can query a word using the following format:
 
-    <query>YOUR_GUESS</query>
+<query>YOURWORD</query>
 
-    Immediately following your query, you will receive a response in this format:
+Where 'YOURWORD' is the {word_length}-letter word you want to guess. The response will immediately follow your query and will be in this format:
 
-    <res>RESPONSE_STRING</res>
+<response>RESPONSE</response>
 
-    The RESPONSE_STRING will be a string of the same length as the secret word, composed of the digits '0', '1', and '2'.  These digits represent the following:
+Where 'RESPONSE' describes the result of your guess using a natural-language style explanation for each letter.
 
-    *   **0:** The letter in your guess at that position is correct (matches the secret word).
-    *   **1:** The letter in your guess at that position is incorrect, and that letter does not appear anywhere in the secret word.
-    *   **2:** The letter in your guess at that position is incorrect, but that letter *does* appear somewhere else in the secret word.
+For example, if the secret word is "SHAPE" and you query "CRANE", the query would be:
 
-    Your objective is to guess the secret word in the fewest possible queries.  Use the information from each response to refine your subsequent guesses. Think step-by-step and explain your reasoning before each query. All words (both your guesses and the secret word) are in UPPERCASE letters.
+<query>CRANE</query>
 
-    **Example (for a 5-letter word):**
+the response would be:
 
-    Let's assume, for the purpose of this example (and *only* this example), that the secret word is "SHAPE". You don't know this.
-    <query>PLANE</query><res>21010</res>
-    Reasoning: 'A' and 'E' are correct, and 'P' is in the word but in the wrong spot. 'L' and 'N' are not in the word. Let's test the position of 'P'.
-    <query>SHAPE</query><res>00000</res>
+<response>The first letter, C, is not in the word. The second letter, R, is in the word but in the wrong position. The third letter, A, is in the word but in the wrong position. The fourth letter, N, is not in the word. The fifth letter, E, is in the correct position.</response>
 
-    Now, begin playing. The secret word has {word_length} letters. Start guessing.
-
+You should make your queries one at a time, and only query one word at a time. It should only contains the word itself, no other text.
+Your objective is to guess the secret word in as few queries as possible.
     """
             print(prompt)
             data = {
-                    "data_source": "NLTK",
+                    "data_source": "gen",
                     "prompt": [{
                         "role": "user",
                         "content": prompt,
@@ -60,15 +56,9 @@ import nltk
 from nltk.corpus import words
 
 def get_unique_english_words(num_words, lens):
-    try:
-        nltk.data.find('corpora/words') # Check if the words corpus is downloaded
-    except LookupError:
-        print("Downloading NLTK words corpus...")
-        nltk.download('words')
-
-
-    all_words = words.words()
-    filtered_words = [word.lower() for word in all_words if len(word) in lens and word.isalpha()]
+    with open("google-10000-english-no-swears.txt", 'r', encoding='utf-8') as f:
+        all_words = [line.strip() for line in f]
+    filtered_words = [word.upper() for word in all_words if len(word) in lens and word.isalpha()]
     unique_words = set(filtered_words)
     
     return random.sample(list(unique_words), num_words)

@@ -525,12 +525,13 @@ class RayPPOTrainer(object):
                     
                     for key in test_batch.batch.keys():
                         test_batch.batch[key] = test_batch.batch[key].long()
-                    
+                    print("finish merge")                    
                     # evaluate using reward_function
                     # for certain reward function (e.g. sandbox), the generation can overlap with reward
                     try:
                         reward_tensor = self.val_reward_fn(test_batch)
-                    except:
+                    except Exception as e:
+                        print(f"Error in reward_fn: {e}")
                         print(test_batch)
                         exit()
 
@@ -707,6 +708,9 @@ class RayPPOTrainer(object):
                 timing_raw = {}
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+
+                batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
+                                                                dtype=object) # n_agent用于grpo
                 batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
 
                 # pop those keys for generation
@@ -753,8 +757,6 @@ class RayPPOTrainer(object):
                                 print('############### here ###################')
                                 print(final_gen_batch_output)
 
-                        batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
-                                                                dtype=object)
                                             
                         # repeat to align with repeated responses in rollout
                         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)

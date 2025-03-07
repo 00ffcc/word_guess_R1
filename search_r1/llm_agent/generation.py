@@ -68,7 +68,7 @@ class LLMGenerationManager:
 
         responses_str = [resp.split('</query>')[0] + '</query>'
                  if '</query>' in resp 
-                 else resp
+                 else (resp if resp!= '' else ' ') # 空串会出bug (ids变成float32)
                  for resp in responses_str]
 
         if self.config.no_think_rl:
@@ -99,12 +99,13 @@ class LLMGenerationManager:
     def _update_rolling_state(self, rollings, cur_responses: torch.Tensor, 
                             next_obs_ids: torch.Tensor) -> Dict:
         """Update rolling state with new responses and observations."""
-        # Concatenate and handle padding        
+        # Concatenate and handle padding     
         new_input_ids = self.tensor_fn.concatenate_with_padding([
             rollings.batch['input_ids'],
             cur_responses,
             next_obs_ids
         ])
+
         
         # Create attention mask and position ids
         new_attention_mask = self.tensor_fn.create_attention_mask(new_input_ids)
@@ -198,7 +199,7 @@ class LLMGenerationManager:
         active_num_list = [active_mask.sum().item()]
         rollings = gen_batch
 
-        ground_truth = [gen_batch[i].non_tensor_batch['reward_model']['ground_truth'] for i in range(len(gen_batch))]
+        ground_truth = [gen_batch[i].non_tensor_batch['reward_model']['ground_truth']['target'] for i in range(len(gen_batch))]
 
         # Main generation loop
         for step in range(self.config.max_turns):
@@ -208,22 +209,21 @@ class LLMGenerationManager:
                 rollings.batch,
                 keys=['input_ids', 'attention_mask', 'position_ids']
             )
-            
             # gen_output = self.actor_rollout_wg.generate_sequences(rollings)
             rollings_active = DataProto.from_dict({
                 k: v[active_mask] for k, v in rollings.batch.items() # mask是bool
             })            
             gen_output = self._generate_with_gpu_padding(rollings_active)
 
-            meta_info = gen_output.meta_info            
+            meta_info = gen_output.meta_info
             responses_ids, responses_str = self._postprocess_responses(gen_output.batch['responses'])
             responses_ids, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_str, active_mask) # 恢复成之前的格式
-
             # Execute in environment and process observations
             # shape?
             next_obs, dones = self.execute_predictions(
                 responses_str, ground_truth, self.tokenizer.pad_token, active_mask
             )
+
             
             curr_active_mask = torch.tensor([not done for done in dones], dtype=torch.bool)
             active_mask = active_mask * curr_active_mask
@@ -294,21 +294,24 @@ class LLMGenerationManager:
         
 
         for i, (action, active, content) in enumerate(zip(cur_actions, active_mask, contents)):
-            
+            gt = ground_truth[i]
             if not active:
                 next_obs.append('')
                 dones.append(1)
             else:
-                if action == 'query':
-                    if content != ground_truth[i]:
-                        next_obs.append(f'<res>{gen_res(content, ground_truth[i])}</res>')
+                if action != 'query':
+                    next_obs.append(f'\n<response>Your previous action is invalid. Your query *must* adhere strictly to the following format: <query>WORD</query>, where WORD is a {len(gt)}-letter word. Please try again.</response>\n')
+                    dones.append(0)
+                elif len(content) != len(gt):
+                    next_obs.append(f'\n<response>Your query is {len(content)} letters long, but the target word is {len(gt)} letters long. Please provide a {len(gt)}-letter word.</response>\n')
+                    dones.append(0)
+                else:
+                    if content != gt:
+                        next_obs.append(f'\n<response>{gen_res(content, gt)}</response>\n')
                         dones.append(0)
                     else:
                         next_obs.append('')
                         dones.append(1)
-                else:
-                    next_obs.append(f'\nMy previous action is invalid. I should put the query between <query> and </query>. Let me try again.\n')
-                    dones.append(0)
             
             
         return next_obs, dones
@@ -328,11 +331,11 @@ class LLMGenerationManager:
                 
         for prediction in predictions:
             if isinstance(prediction, str): # for llm output
-                pattern = r'<query>(.*?)</\1>'
+                pattern = r'<query>(.*?)</query>'
                 match = re.search(pattern, prediction, re.DOTALL)
                 if match:
-                    content = match.group(2).strip()  # Return only the content inside the tags
-                    action = match.group(1)
+                    content = match.group(1).upper()  # Return only the content inside the tags
+                    action = 'query'
                 else:
                     content = ''
                     action = None
@@ -378,13 +381,14 @@ class LLMGenerationManager:
         return format_reference
 
 def gen_res(prediction: str, ground_truth: str) -> str:
+    strs = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth','seventh', 'eighth', 'ninth', 'tenth', 'eleventh', 'twelfth']
     res = ''
     for i in range(len(prediction)):
         if prediction[i] == ground_truth[i]:
-            res += '0'
+            res += f'The {strs[i]} letter, {prediction[i]}, is in the correct position.\n'
         else:
             if prediction[i] not in ground_truth:
-                res += '1'
+                res += f'The {strs[i]} letter, {prediction[i]}, is not in the word.\n'
             else:
-                res += '2'
+                res += f'The {strs[i]} letter, {prediction[i]}, is in the word but in the wrong position.\n'
     return res

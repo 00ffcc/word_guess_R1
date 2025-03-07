@@ -17,16 +17,13 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 
 from verl import DataProto
 import torch
-from verl.utils.reward_score import qa_em
+from verl.utils.reward_score import qa_em, word_guessing
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 import re
 import numpy as np
 
 def _select_rm_score_fn(data_source):
-    if "nq" in data_source:
-        return qa_em.compute_score_em
-    else:
-        raise NotImplementedError
+    return word_guessing.compute_score
 
 
 class RewardManager():
@@ -41,6 +38,7 @@ class RewardManager():
     def __call__(self, data: DataProto):
         """We will expand this function gradually based on the available datasets"""
 
+        print("call reward fn")
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
         if 'rm_scores' in data.batch.keys():
             return data.batch['rm_scores']
@@ -70,6 +68,8 @@ class RewardManager():
             sequences_str = self.tokenizer.decode(sequences)
 
             ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+
+            # print("solution_str: ", sequences_str, "ground_truth: ", ground_truth)
 
             # select rm_score
             data_source = data_item.non_tensor_batch['data_source']
